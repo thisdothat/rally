@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import Image from 'next/image'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
@@ -70,11 +71,12 @@ export default function Sidebar({ userName, userEmail }: SidebarProps) {
   return (
     <aside className="fixed left-0 top-0 h-full w-64 bg-gray-900 border-r border-gray-800 flex flex-col">
       <div className="px-6 py-5 border-b border-gray-800 flex justify-center">
-        <img
+        <Image
           src="https://jsdjzfchuhsepvjztnum.supabase.co/storage/v1/object/public/images/Image.png"
           alt="Rally KPI"
-          className="w-auto"
-          style={{ height: '4rem' }}
+          width={160}
+          height={64}
+          className="w-auto h-16 object-contain"
         />
       </div>
 

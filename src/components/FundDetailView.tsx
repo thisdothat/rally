@@ -676,10 +676,6 @@ export default function FundDetailView({
                   const displayUnit = unitOverrides[row.id] ?? row.unit_of_metric ?? ''
                   const rawValue = indicatorOverrides[row.id] ?? row.level_of_indicator
                   const numericValue = parseMetricValue(rawValue)
-                  const maxForUnit = unitMaxMap.get(displayUnit) ?? numericValue ?? 1
-                  const barPct = numericValue !== null && maxForUnit > 0
-                    ? Math.round((numericValue / maxForUnit) * 100)
-                    : null
                   const accent = areaAccent(row.rally_impact_area)
 
                   return (
