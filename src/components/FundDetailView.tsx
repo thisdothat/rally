@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useMemo } from 'react'
-import { saveKpiMatch } from '@/app/actions/projects'
+import { saveKpiMatch, setExclusionCode } from '@/app/actions/projects'
 
 type Conversion = {
   from_unit: string
@@ -29,7 +29,7 @@ type RowState = {
   open: boolean
 }
 
-type SavedKpi = { code: string; name: string; id?: string | null; unit?: string }
+type SavedKpi = { code: string; name: string; id?: string | null; unit?: string; confidence?: number | null; flag?: string | null }
 
 type BatchState = {
   running: boolean
@@ -57,6 +57,17 @@ export type FundRow = {
   matched_kpi_id?: string | null
   matched_kpi_code?: string | null
   matched_kpi_name?: string | null
+  match_confidence?: number | null
+  match_flag?: string | null
+  exclusion_code?: string | null
+  exclusion_notes?: string | null
+}
+
+const EXCLUSION_LABELS: Record<string, { label: string; color: string }> = {
+  'forecasted':   { label: 'Forecasted',   color: 'bg-purple-900/60 text-purple-300 border-purple-700' },
+  'double_count': { label: 'Double Count', color: 'bg-orange-900/60 text-orange-300 border-orange-700' },
+  'outdated':     { label: 'Outdated',     color: 'bg-yellow-900/60 text-yellow-300 border-yellow-700' },
+  'missing':      { label: 'Missing',      color: 'bg-red-900/60 text-red-300 border-red-700' },
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -329,14 +340,18 @@ export default function FundDetailView({
       rows.map(r => [
         r.id,
         r.matched_kpi_code
-          ? { code: r.matched_kpi_code, name: r.matched_kpi_name ?? '', id: r.matched_kpi_id }
+          ? { code: r.matched_kpi_code, name: r.matched_kpi_name ?? '', id: r.matched_kpi_id, confidence: r.match_confidence, flag: r.match_flag }
           : null,
       ])
     )
   )
   const [unitOverrides, setUnitOverrides] = useState<Record<string, string>>({})
   const [indicatorOverrides, setIndicatorOverrides] = useState<Record<string, string>>({})
+  const [exclusionCodes, setExclusionCodes] = useState<Record<string, string | null>>(() =>
+    Object.fromEntries(rows.map(r => [r.id, r.exclusion_code ?? null]))
+  )
   const [savingRow, setSavingRow] = useState<string | null>(null)
+  const [excludingRow, setExcludingRow] = useState<string | null>(null)
   const [batch, setBatch] = useState<BatchState | null>(null)
   const cancelRef = useRef(false)
 
@@ -350,7 +365,24 @@ export default function FundDetailView({
     return map
   }, [rows])
 
-  const unmatchedCount = rows.filter(r => !savedKpis[r.id]).length
+  const unmatchedCount = rows.filter(r => !savedKpis[r.id] && !exclusionCodes[r.id]).length
+
+  // Detect double-counting: same holding matched to same KPI more than once
+  const doubleCountFlags = useMemo(() => {
+    const seen = new Map<string, string[]>()
+    for (const row of rows) {
+      const saved = savedKpis[row.id]
+      if (!saved) continue
+      const key = `${row.underlying_holding ?? ''}::${saved.code}`
+      if (!seen.has(key)) seen.set(key, [])
+      seen.get(key)!.push(row.id)
+    }
+    const flagged = new Set<string>()
+    Array.from(seen.values()).forEach(ids => {
+      if (ids.length > 1) ids.forEach((id: string) => flagged.add(id))
+    })
+    return flagged
+  }, [rows, savedKpis])
 
   const handleMatch = async (row: FundRow) => {
     const current = matchStates[row.id]
@@ -388,6 +420,9 @@ export default function FundDetailView({
           : parseFloat(convertedValue.toFixed(6)).toString())
       : null
 
+    const confidence = Math.round(match.match_score * 100)
+    const flag = confidence >= 80 ? 'exact_match' : confidence >= 50 ? 'needs_review' : null
+
     try {
       const { error } = await saveKpiMatch(
         rowId,
@@ -396,12 +431,14 @@ export default function FundDetailView({
         match.kpi_name,
         match.kpi_id ?? null,
         unitChanged ? unit : null,
-        indicatorStr
+        indicatorStr,
+        confidence,
+        flag,
       )
       if (error) {
         alert(`Could not save KPI: ${error}`)
       } else {
-        setSavedKpis(prev => ({ ...prev, [rowId]: { code: match.kpi_code, name: match.kpi_name, id: match.kpi_id, unit } }))
+        setSavedKpis(prev => ({ ...prev, [rowId]: { code: match.kpi_code, name: match.kpi_name, id: match.kpi_id, unit, confidence, flag } }))
         if (unitChanged) setUnitOverrides(prev => ({ ...prev, [rowId]: unit }))
         if (indicatorStr) setIndicatorOverrides(prev => ({ ...prev, [rowId]: indicatorStr }))
         setMatchStates(prev => ({ ...prev, [rowId]: { ...prev[rowId], open: false } }))
@@ -412,8 +449,15 @@ export default function FundDetailView({
     setSavingRow(null)
   }
 
+  const handleExclude = async (rowId: string, code: string | null) => {
+    setExcludingRow(rowId)
+    const { error } = await setExclusionCode(rowId, projectId, code)
+    if (!error) setExclusionCodes(prev => ({ ...prev, [rowId]: code }))
+    setExcludingRow(null)
+  }
+
   const runBatch = async () => {
-    const toProcess = rows.filter(r => !savedKpis[r.id])
+    const toProcess = rows.filter(r => !savedKpis[r.id] && !exclusionCodes[r.id])
     if (toProcess.length === 0) return
 
     cancelRef.current = false
@@ -477,9 +521,18 @@ export default function FundDetailView({
       const saved = savedKpis[row.id]
       const isOpen = state?.open
       const hasMatches = !!state?.matches
+      const exclusion = exclusionCodes[row.id]
+      const isExcluded = !!exclusion
+      const isDoubleCount = doubleCountFlags.has(row.id)
+      const excInfo = exclusion ? EXCLUSION_LABELS[exclusion] : null
+
+      const rowBg = isExcluded
+        ? 'bg-gray-900/30 opacity-60'
+        : i > 0 ? 'border-t border-gray-800' : ''
 
       const metricRow = (
-        <tr key={row.id} className={`hover:bg-gray-800/40 transition-colors ${i > 0 ? 'border-t border-gray-800' : ''}`}>
+        <tr key={row.id} className={`hover:bg-gray-800/30 transition-colors ${rowBg}`}>
+          {/* Value */}
           <td className="px-4 py-3 text-xs whitespace-nowrap">
             {indicatorOverrides[row.id] ? (
               <span className="text-indigo-300 font-medium">{indicatorOverrides[row.id]}</span>
@@ -487,9 +540,11 @@ export default function FundDetailView({
               <span className="text-gray-400">{row.level_of_indicator || '—'}</span>
             )}
           </td>
+          {/* Metric */}
           <td className="px-4 py-3 text-white font-medium max-w-xs">
-            <p className="leading-snug">{row.metric || '—'}</p>
+            <p className={`leading-snug ${isExcluded ? 'line-through text-gray-500' : ''}`}>{row.metric || '—'}</p>
           </td>
+          {/* Unit */}
           <td className="px-4 py-3 text-xs whitespace-nowrap">
             {unitOverrides[row.id] ? (
               <span className="text-indigo-300 font-medium">{unitOverrides[row.id]}</span>
@@ -497,24 +552,68 @@ export default function FundDetailView({
               <span className="text-gray-400">{row.unit_of_metric || '—'}</span>
             )}
           </td>
+          {/* Reporting Level */}
+          <td className="px-4 py-3 text-xs whitespace-nowrap">
+            {row.reporting_level ? (
+              <span className="px-2 py-0.5 bg-gray-800 border border-gray-700 text-gray-400 rounded text-xs">
+                {row.reporting_level}
+              </span>
+            ) : <span className="text-gray-600">—</span>}
+          </td>
+          {/* Outcome */}
           <td className="px-4 py-3 text-gray-400 text-xs max-w-xs">
             <p className="leading-relaxed line-clamp-3">{row.social_environmental_outcome || '—'}</p>
             {row.comments && (
               <p className="text-gray-600 mt-1 line-clamp-2 italic">{row.comments}</p>
             )}
           </td>
+          {/* Status */}
           <td className="px-4 py-3">
             {row.status_of_outcome ? <StatusBadge status={row.status_of_outcome} /> : <span className="text-gray-600">—</span>}
           </td>
+          {/* Impact Area */}
           <td className="px-4 py-3 text-gray-400 text-xs">{row.rally_impact_area || '—'}</td>
+          {/* Rally Outcome */}
           <td className="px-4 py-3 text-gray-400 text-xs">{row.rally_outcome || '—'}</td>
+          {/* Matched KPI */}
           <td className="px-4 py-3">
-            {saved ? (
-              <div className="flex flex-col gap-0.5">
-                <span className="px-2 py-0.5 bg-indigo-900/60 border border-indigo-700 text-indigo-300 text-xs font-mono font-bold rounded self-start">
-                  {saved.code}
-                </span>
+            {isExcluded ? (
+              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${excInfo?.color ?? 'bg-gray-800 text-gray-400 border-gray-700'}`}>
+                {excInfo?.label ?? exclusion}
+              </span>
+            ) : saved ? (
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="px-2 py-0.5 bg-indigo-900/60 border border-indigo-700 text-indigo-300 text-xs font-mono font-bold rounded">
+                    {saved.code}
+                  </span>
+                  {saved.confidence != null && (
+                    <span className={`text-xs font-medium px-1.5 py-0.5 rounded border ${
+                      saved.confidence >= 80
+                        ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800'
+                        : 'bg-amber-900/40 text-amber-400 border-amber-800'
+                    }`}>
+                      {saved.confidence}%
+                    </span>
+                  )}
+                </div>
                 <span className="text-xs text-gray-400 leading-snug max-w-[160px]">{saved.name}</span>
+                {saved.flag === 'needs_review' && (
+                  <span className="text-xs text-amber-500 flex items-center gap-1">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                    </svg>
+                    Needs review
+                  </span>
+                )}
+                {isDoubleCount && (
+                  <span className="text-xs text-orange-400 flex items-center gap-1">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    Possible double count
+                  </span>
+                )}
               </div>
             ) : (
               <button
@@ -556,14 +655,41 @@ export default function FundDetailView({
               </button>
             )}
           </td>
+          {/* Exclude control */}
+          <td className="px-3 py-3">
+            {excludingRow === row.id ? (
+              <span className="w-4 h-4 border border-gray-500 border-t-transparent rounded-full animate-spin inline-block" />
+            ) : isExcluded ? (
+              <button
+                onClick={() => handleExclude(row.id, null)}
+                title="Remove exclusion"
+                className="text-gray-600 hover:text-gray-300 transition text-xs underline"
+              >
+                Restore
+              </button>
+            ) : (
+              <select
+                defaultValue=""
+                onChange={e => { if (e.target.value) handleExclude(row.id, e.target.value) }}
+                className="text-xs bg-transparent text-gray-600 hover:text-gray-400 border-0 cursor-pointer focus:outline-none focus:ring-0 w-20"
+                title="Exclude this row"
+              >
+                <option value="">Exclude…</option>
+                <option value="forecasted">Forecasted</option>
+                <option value="double_count">Double count</option>
+                <option value="outdated">Outdated</option>
+                <option value="missing">Missing</option>
+              </select>
+            )}
+          </td>
         </tr>
       )
 
-      if (!isOpen) return [metricRow]
+      if (!isOpen || isExcluded) return [metricRow]
 
       const expandedRow = (
         <tr key={`${row.id}-expanded`} className="border-t border-gray-800 bg-gray-900/60">
-          <td colSpan={8} className="px-5 py-4">
+          <td colSpan={10} className="px-5 py-4">
             {state.loading && (
               <div className="flex items-center gap-3 text-gray-400 text-sm py-1">
                 <span className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
@@ -611,14 +737,16 @@ export default function FundDetailView({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-left bg-gray-900">
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Level</th>
+              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-24">Value</th>
               <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Metric</th>
               <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-24">Unit</th>
+              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Rep. Level</th>
               <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Outcome</th>
               <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-32">Status</th>
               <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Impact Area</th>
               <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Rally Outcome</th>
-              <th className="px-4 py-2.5 w-44 text-xs font-semibold text-gray-500 uppercase tracking-wide">Matched KPI</th>
+              <th className="px-4 py-2.5 w-48 text-xs font-semibold text-gray-500 uppercase tracking-wide">Matched KPI</th>
+              <th className="px-3 py-2.5 w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">Exclude</th>
             </tr>
           </thead>
           <tbody>{tableRows}</tbody>

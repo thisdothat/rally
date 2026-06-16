@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@/lib/supabase/server'
-import { DEFAULT_KEYWORD_RULES, DEFAULT_PROMPT_TEMPLATE, type KeywordRule } from '@/lib/agentDefaults'
+import { DEFAULT_KEYWORD_RULES, DEFAULT_PROMPT_TEMPLATE, COMMON_UNIT_MAP, type KeywordRule } from '@/lib/agentDefaults'
 
 const anthropic = new Anthropic()
 
@@ -134,13 +134,17 @@ export async function POST(request: NextRequest) {
 
     const { kpis: relevantKpis, signals } = selectKpis(kpiCache, row, keyword_rules)
 
+    const commonUnit = COMMON_UNIT_MAP[(row.unit_of_metric ?? '').toLowerCase().trim()]
+
     const rowContext = [
       row.metric                       && `Metric: ${row.metric}`,
       row.social_environmental_outcome && `Outcome: ${row.social_environmental_outcome}`,
       row.unit_of_metric               && `Unit: ${row.unit_of_metric}`,
+      commonUnit                       && `Common Unit: ${commonUnit}`,
       row.rally_impact_area            && `Impact Area: ${row.rally_impact_area}`,
       row.rally_outcome                && `Pathway: ${row.rally_outcome}`,
       row.level_of_indicator           && `Indicator Level: ${row.level_of_indicator}`,
+      row.reporting_level              && `Reporting Level: ${row.reporting_level}`,
       row.comments                     && `Notes: ${row.comments}`,
     ].filter(Boolean).join('\n')
 

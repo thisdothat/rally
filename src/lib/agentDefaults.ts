@@ -13,6 +13,54 @@ export const DEFAULT_KEYWORD_RULES: KeywordRule[] = [
   { triggers: ['microfinance', 'loan', 'credit', 'financial'],                                    tags: ['Financial Inclusion'] },
 ]
 
+// Maps raw unit strings (lowercase) to a standardized common unit for aggregation.
+// Used to normalize unit context before AI matching.
+export const COMMON_UNIT_MAP: Record<string, string> = {
+  // People
+  'artist': 'People', 'artists': 'People',
+  'beneficiary': 'People', 'beneficiaries': 'People',
+  'borrower': 'People', 'borrowers': 'People',
+  'child': 'People', 'children': 'People',
+  'client': 'People', 'clients': 'People',
+  'employee': 'People', 'employees': 'People',
+  'entrepreneur': 'People', 'entrepreneurs': 'People',
+  'farmer': 'People', 'farmers': 'People',
+  'fellow': 'People', 'fellows': 'People',
+  'girl': 'People', 'girls': 'People',
+  'household': 'People', 'households': 'People',
+  'individual': 'People', 'individuals': 'People',
+  'learner': 'People', 'learners': 'People',
+  'man': 'People', 'men': 'People',
+  'member': 'People', 'members': 'People',
+  'participant': 'People', 'participants': 'People',
+  'patient': 'People', 'patients': 'People',
+  'person': 'People', 'persons': 'People',
+  'refugee': 'People', 'refugees': 'People',
+  'student': 'People', 'students': 'People',
+  'woman': 'People', 'women': 'People',
+  'worker': 'People', 'workers': 'People',
+  'youth': 'People',
+  // Organizations
+  'business': 'Organizations', 'businesses': 'Organizations',
+  'company': 'Organizations', 'companies': 'Organizations',
+  'cooperative': 'Organizations', 'cooperatives': 'Organizations',
+  'enterprise': 'Organizations', 'enterprises': 'Organizations',
+  'firm': 'Organizations', 'firms': 'Organizations',
+  'msme': 'Organizations', 'msmes': 'Organizations',
+  'non-profit': 'Organizations', 'non-profits': 'Organizations',
+  'nonprofit': 'Organizations', 'nonprofits': 'Organizations',
+  'sme': 'Organizations', 'smes': 'Organizations',
+  'startup': 'Organizations', 'startups': 'Organizations',
+  'venture': 'Organizations', 'ventures': 'Organizations',
+  // Housing units
+  'affordable unit': 'Housing units', 'affordable units': 'Housing units',
+  'apartment': 'Housing units', 'apartments': 'Housing units',
+  'dwelling': 'Housing units', 'dwellings': 'Housing units',
+  'home': 'Housing units', 'homes': 'Housing units',
+  'rental unit': 'Housing units', 'rental units': 'Housing units',
+  'unit': 'Housing units', 'units': 'Housing units',
+}
+
 export const DEFAULT_PROMPT_TEMPLATE = `Match this fund metric to the most relevant KPIs from the Rally library.
 
 FUND METRIC:
@@ -23,7 +71,7 @@ RALLY KPI LIBRARY ({kpiCount} KPIs — Code | Name | Unit | Impact Areas | Pathw
 
 Prioritise:
 1. What is actually being measured (the noun — water, energy, people, etc.)
-2. Whether the unit is compatible
+2. Whether the unit is compatible (use Common Unit if provided)
 3. Whether the indicator level (Output/Outcome/Impact) aligns
 4. Thematic / impact area fit
 

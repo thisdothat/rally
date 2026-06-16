@@ -66,19 +66,23 @@ export async function saveKpiMatch(
   kpiName: string | null,
   kpiId: string | null,
   unitOverride: string | null,
-  indicatorOverride: string | null
+  indicatorOverride: string | null,
+  confidence?: number | null,
+  flag?: string | null,
 ): Promise<{ error: string | null }> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return { error: 'Not authenticated' }
 
-  const update: Record<string, string | null> = {
+  const update: Record<string, string | number | null> = {
     matched_kpi_id: kpiId,
     matched_kpi_code: kpiCode,
     matched_kpi_name: kpiName,
   }
   if (unitOverride !== null) update.unit_of_metric = unitOverride
   if (indicatorOverride !== null) update.level_of_indicator = indicatorOverride
+  if (confidence != null) update.match_confidence = confidence
+  if (flag != null) update.match_flag = flag
 
   const { error } = await supabase
     .from('fund_report_rows')
@@ -87,6 +91,26 @@ export async function saveKpiMatch(
 
   if (error) return { error: error.message }
 
+  revalidatePath(`/dashboard/funds/${projectId}`)
+  return { error: null }
+}
+
+export async function setExclusionCode(
+  rowId: string,
+  projectId: string,
+  code: string | null,
+  notes?: string | null,
+): Promise<{ error: string | null }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return { error: 'Not authenticated' }
+
+  const { error } = await supabase
+    .from('fund_report_rows')
+    .update({ exclusion_code: code, exclusion_notes: notes ?? null })
+    .eq('id', rowId)
+
+  if (error) return { error: error.message }
   revalidatePath(`/dashboard/funds/${projectId}`)
   return { error: null }
 }
