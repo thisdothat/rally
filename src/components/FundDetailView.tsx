@@ -352,6 +352,7 @@ export default function FundDetailView({
   )
   const [savingRow, setSavingRow] = useState<string | null>(null)
   const [excludingRow, setExcludingRow] = useState<string | null>(null)
+  const [openExcludeMenu, setOpenExcludeMenu] = useState<string | null>(null)
   const [batch, setBatch] = useState<BatchState | null>(null)
   const cancelRef = useRef(false)
 
@@ -663,23 +664,41 @@ export default function FundDetailView({
               <button
                 onClick={() => handleExclude(row.id, null)}
                 title="Remove exclusion"
-                className="text-gray-600 hover:text-gray-300 transition text-xs underline"
+                className="text-gray-600 hover:text-emerald-400 transition text-xs"
               >
                 Restore
               </button>
             ) : (
-              <select
-                defaultValue=""
-                onChange={e => { if (e.target.value) handleExclude(row.id, e.target.value) }}
-                className="text-xs bg-transparent text-gray-600 hover:text-gray-400 border-0 cursor-pointer focus:outline-none focus:ring-0 w-20"
-                title="Exclude this row"
-              >
-                <option value="">Exclude…</option>
-                <option value="forecasted">Forecasted</option>
-                <option value="double_count">Double count</option>
-                <option value="outdated">Outdated</option>
-                <option value="missing">Missing</option>
-              </select>
+              <div className="relative">
+                <button
+                  onClick={() => setOpenExcludeMenu(openExcludeMenu === row.id ? null : row.id)}
+                  title="Flag this row for exclusion"
+                  className="p-1 text-gray-700 hover:text-amber-400 transition rounded"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6H13l-1-1H5a2 2 0 00-2 2zm9-13.5V9" />
+                  </svg>
+                </button>
+                {openExcludeMenu === row.id && (
+                  <div className="absolute right-0 top-7 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]">
+                    <p className="px-3 py-1 text-xs text-gray-500 font-semibold uppercase tracking-wide border-b border-gray-700 mb-1">Flag as…</p>
+                    {[
+                      { code: 'forecasted',   label: 'Forecasted' },
+                      { code: 'double_count', label: 'Double count' },
+                      { code: 'outdated',     label: 'Outdated' },
+                      { code: 'missing',      label: 'Missing value' },
+                    ].map(opt => (
+                      <button
+                        key={opt.code}
+                        onClick={() => { handleExclude(row.id, opt.code); setOpenExcludeMenu(null) }}
+                        className="block w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700 hover:text-white transition"
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </td>
         </tr>
