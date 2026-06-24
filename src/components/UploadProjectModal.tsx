@@ -6,61 +6,52 @@ import { saveProject } from '@/app/actions/projects'
 import type { ParsedRow } from '@/lib/parseProjectData'
 
 // Map from lowercase header alias → ParsedRow field key
+// Matches exact column names in the Rally export spreadsheet
 const HEADER_MAP: Record<string, string> = {
   '#':                                        'row_number',
-  'number':                                   'row_number',
-  'project name':                             'project_name',
-  'project':                                  'project_name',
-  'fund name':                                'project_name',
-  'fund':                                     'project_name',
   'metric':                                   'metric',
-  'indicator':                                'metric',
-  'social/environmental outcome':             'social_environmental_outcome',
-  'social environmental outcome':             'social_environmental_outcome',
-  'outcome':                                  'social_environmental_outcome',
-  'status of outcome':                        'status_of_outcome',
-  'status':                                   'status_of_outcome',
-  'comments regarding the reporting period':  'comments',
-  'comments':                                 'comments',
-  'notes':                                    'comments',
+  'product name':                             'project_name',  // exact spreadsheet column name
+  'project name':                             'project_name',
+  'fund name':                                'project_name',
   'reporting level':                          'reporting_level',
   'underlying holding':                       'underlying_holding',
   'holding':                                  'underlying_holding',
-  'company':                                  'underlying_holding',
-  'level of indicator':                       'level_of_indicator',
-  'indicator level':                          'level_of_indicator',
-  'value':                                    'level_of_indicator',
-  'amount':                                   'level_of_indicator',
+  'comments regarding the reporting period':  'comments',
+  'comments':                                 'comments',
+  'social/environmental outcome':             'social_environmental_outcome',
+  'social environmental outcome':             'social_environmental_outcome',
+  'status of outcome':                        'status_of_outcome',
+  'status':                                   'status_of_outcome',
   'unit of metric':                           'unit_of_metric',
   'unit':                                     'unit_of_metric',
-  'units':                                    'unit_of_metric',
+  'level of indicator':                       'level_of_indicator',
   'rally input: main impact area':            'rally_impact_area',
   'rally input main impact area':             'rally_impact_area',
   'main impact area':                         'rally_impact_area',
-  'impact area':                              'rally_impact_area',
   'rally input: outcome':                     'rally_outcome',
   'rally input outcome':                      'rally_outcome',
   'rally outcome':                            'rally_outcome',
+  'reporting start time':                     'reporting_start',  // exact spreadsheet column name
   'reporting start':                          'reporting_start',
-  'start':                                    'reporting_start',
+  'reporting end time':                       'reporting_end',    // exact spreadsheet column name
   'reporting end':                            'reporting_end',
-  'end':                                      'reporting_end',
 }
 
+// Labels match the exact column names in the Rally export spreadsheet
 const DB_FIELDS: { key: keyof ParsedRow; label: string; required?: boolean; hint: string }[] = [
-  { key: 'project_name',                label: 'Project Name',                 hint: 'Groups rows into separate projects' },
-  { key: 'metric',                      label: 'Metric',                       required: true, hint: 'What is being measured' },
-  { key: 'underlying_holding',          label: 'Underlying Holding',           hint: 'Company or investment name' },
-  { key: 'level_of_indicator',          label: 'Level of Indicator',           hint: 'Numeric value' },
-  { key: 'unit_of_metric',              label: 'Unit of Metric',               hint: 'e.g. MWh, jobs, M³' },
-  { key: 'social_environmental_outcome',label: 'Outcome',                      hint: 'Social/environmental outcome' },
-  { key: 'rally_impact_area',           label: 'Rally Impact Area',            hint: 'Thematic impact area' },
-  { key: 'rally_outcome',               label: 'Rally Outcome',                hint: 'Impact pathway' },
-  { key: 'status_of_outcome',           label: 'Status',                       hint: 'Achieved, On Track, etc.' },
-  { key: 'comments',                    label: 'Comments',                     hint: 'Additional notes' },
-  { key: 'reporting_level',             label: 'Reporting Level',              hint: 'Output / Outcome / Impact' },
-  { key: 'reporting_start',             label: 'Reporting Start',              hint: 'Period start date' },
-  { key: 'reporting_end',               label: 'Reporting End',                hint: 'Period end date' },
+  { key: 'project_name',                label: 'Product Name',                             required: true, hint: 'Fund name — groups rows into separate projects' },
+  { key: 'metric',                      label: 'Metric',                                   required: true, hint: 'What is being measured' },
+  { key: 'underlying_holding',          label: 'Underlying Holding',                       hint: 'Holding ID number' },
+  { key: 'reporting_level',             label: 'Reporting Level',                          hint: 'e.g. Underlying holding level, Portfolio level' },
+  { key: 'level_of_indicator',          label: 'Level of Indicator',                       hint: 'The numeric value' },
+  { key: 'unit_of_metric',              label: 'Unit of Metric',                           hint: 'e.g. MWh, jobs, tons CO2e' },
+  { key: 'social_environmental_outcome',label: 'Social/Environmental Outcome',             hint: 'What impact does this metric represent' },
+  { key: 'status_of_outcome',           label: 'Status of Outcome',                        hint: 'e.g. realized, forecasted' },
+  { key: 'rally_impact_area',           label: 'Rally Input: Main Impact Area',            hint: 'e.g. Clean Energy, Quality Jobs' },
+  { key: 'rally_outcome',               label: 'Rally Input: Outcome',                     hint: 'Impact pathway description' },
+  { key: 'comments',                    label: 'Comments regarding the reporting period',  hint: 'Additional context' },
+  { key: 'reporting_start',             label: 'Reporting Start time',                     hint: 'Period start date' },
+  { key: 'reporting_end',               label: 'Reporting End time',                       hint: 'Period end date' },
 ]
 
 type Step = 'upload' | 'map' | 'saving'
@@ -89,7 +80,7 @@ function applyFieldMap(fileRows: CellValue[][], headers: string[], fieldMap: Fie
       }
 
       const raw_row: Record<string, string> = {}
-      headers.forEach((h, idx) => { raw_row[h] = String(row[idx] ?? '') })
+      headers.forEach((h, idx) => { if (h) raw_row[h] = String(row[idx] ?? '') })
 
       return {
         row_number: String(i + 1),
@@ -158,10 +149,17 @@ export default function UploadProjectModal() {
 
       if (data.length < 2) { setError('File appears to be empty or has no data rows.'); return }
 
-      const headers = (data[0] as CellValue[]).map(h => String(h ?? '').trim()).filter(Boolean)
+      // Keep ALL column positions including empty ones — empty columns in the spreadsheet
+      // (like the blank column 6 in the Rally export) must not shift column indices.
+      // We only trim trailing empty columns.
+      const rawHeaders = (data[0] as CellValue[]).map(h => String(h ?? '').trim())
+      let lastNonEmpty = rawHeaders.length - 1
+      while (lastNonEmpty > 0 && !rawHeaders[lastNonEmpty]) lastNonEmpty--
+      const headers = rawHeaders.slice(0, lastNonEmpty + 1)
+
       const rows = (data.slice(1) as CellValue[][]).filter(r => r.some(c => c !== null && c !== ''))
 
-      if (headers.length === 0) { setError('Could not read column headers from the first row.'); return }
+      if (!headers.some(Boolean)) { setError('Could not read column headers from the first row.'); return }
 
       setFileName(file.name)
       setFileHeaders(headers)
@@ -379,7 +377,7 @@ export default function UploadProjectModal() {
                               }`}
                             >
                               <option value="">— not mapped —</option>
-                              {fileHeaders.map(h => (
+                              {fileHeaders.filter(Boolean).map(h => (
                                 <option key={h} value={h}>{h}</option>
                               ))}
                             </select>

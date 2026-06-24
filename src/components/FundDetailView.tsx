@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useRef, useMemo } from 'react'
-import { saveKpiMatch, setExclusionCode } from '@/app/actions/projects'
+import React, { useState, useRef, useMemo } from 'react'
+import { saveKpiMatch, setExclusionCode, remapProjectRows } from '@/app/actions/projects'
 
 type Conversion = {
   from_unit: string
@@ -44,6 +44,7 @@ type BatchState = {
 
 export type FundRow = {
   id: string
+  project_name: string | null
   metric: string | null
   social_environmental_outcome: string | null
   unit_of_metric: string | null
@@ -54,6 +55,8 @@ export type FundRow = {
   comments: string | null
   reporting_level: string | null
   underlying_holding: string | null
+  reporting_start: string | null
+  reporting_end: string | null
   matched_kpi_id?: string | null
   matched_kpi_code?: string | null
   matched_kpi_name?: string | null
@@ -61,6 +64,7 @@ export type FundRow = {
   match_flag?: string | null
   exclusion_code?: string | null
   exclusion_notes?: string | null
+  raw_row?: Record<string, string> | null
 }
 
 const EXCLUSION_LABELS: Record<string, { label: string; color: string }> = {
@@ -356,6 +360,68 @@ export default function FundDetailView({
   const [batch, setBatch] = useState<BatchState | null>(null)
   const cancelRef = useRef(false)
 
+  // Re-map columns state
+  const [remapOpen, setRemapOpen] = useState(false)
+  const [remapSaving, setRemapSaving] = useState(false)
+  const [remapError, setRemapError] = useState<string | null>(null)
+  const [remapSuccess, setRemapSuccess] = useState(false)
+
+  const rawHeaders = useMemo(() => {
+    const first = rows.find(r => r.raw_row && Object.keys(r.raw_row).length > 0)
+    return first?.raw_row ? Object.keys(first.raw_row) : []
+  }, [rows])
+
+  const DB_FIELD_LABELS: { key: string; label: string }[] = [
+    { key: 'metric',                       label: 'Metric' },
+    { key: 'level_of_indicator',           label: 'Level of Indicator' },
+    { key: 'unit_of_metric',               label: 'Unit of Metric' },
+    { key: 'project_name',                 label: 'Product Name' },
+    { key: 'underlying_holding',           label: 'Underlying Holding' },
+    { key: 'reporting_start',              label: 'Reporting Start' },
+    { key: 'reporting_end',                label: 'Reporting End' },
+    { key: 'reporting_level',              label: 'Reporting Level' },
+    { key: 'status_of_outcome',            label: 'Status of Outcome' },
+    { key: 'social_environmental_outcome', label: 'Social/Environmental Outcome' },
+    { key: 'rally_impact_area',            label: 'Rally Input: Main Impact Area' },
+    { key: 'rally_outcome',                label: 'Rally Input: Outcome' },
+    { key: 'comments',                     label: 'Comments regarding the reporting period' },
+  ]
+
+  // Auto-detect current mapping by matching field values against raw_row keys
+  const initialRemapMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    const sampleRow = rows[0]
+    if (!sampleRow?.raw_row) return map
+    for (const { key } of DB_FIELD_LABELS) {
+      const currentVal = (sampleRow as unknown as Record<string, string>)[key]
+      if (!currentVal) continue
+      const match = Object.entries(sampleRow.raw_row).find(([, v]) => v === currentVal)
+      if (match) map[key] = match[0]
+    }
+    return map
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows])
+
+  const [remapMap, setRemapMap] = useState<Record<string, string>>({})
+
+  const handleOpenRemap = () => {
+    setRemapMap(initialRemapMap)
+    setRemapError(null)
+    setRemapSuccess(false)
+    setRemapOpen(true)
+  }
+
+  const handleSaveRemap = async () => {
+    setRemapSaving(true)
+    setRemapError(null)
+    const { error, updated } = await remapProjectRows(projectId, remapMap)
+    setRemapSaving(false)
+    if (error) { setRemapError(error); return }
+    setRemapSuccess(true)
+    setTimeout(() => { setRemapOpen(false); setRemapSuccess(false) }, 1200)
+    void updated
+  }
+
   const holdingMap = useMemo(() => {
     const map = new Map<string, FundRow[]>()
     for (const row of rows) {
@@ -495,11 +561,26 @@ export default function FundDetailView({
           body: JSON.stringify({ row }),
         })
         const data = await res.json()
-        if (res.ok && !data.error) {
+        if (res.ok && !data.error && data.matches?.length > 0) {
+          const matches: MatchResult[] = data.matches
           setMatchStates(prev => ({
             ...prev,
-            [row.id]: { loading: false, matches: data.matches, error: null, open: false },
+            [row.id]: { loading: false, matches, error: null, open: false },
           }))
+          // Auto-save the top match
+          const top = matches[0]
+          const confidence = Math.round(top.match_score * 100)
+          const flag = confidence >= 80 ? 'exact_match' : confidence >= 50 ? 'needs_review' : null
+          try {
+            const { error } = await saveKpiMatch(
+              row.id, projectId,
+              top.kpi_code, top.kpi_name, top.kpi_id ?? null,
+              null, null, confidence, flag,
+            )
+            if (!error) {
+              setSavedKpis(prev => ({ ...prev, [row.id]: { code: top.kpi_code, name: top.kpi_name, id: top.kpi_id, unit: row.unit_of_metric ?? '', confidence, flag } }))
+            }
+          } catch { /* silently continue */ }
         }
       } catch {
         // silently continue — individual row failure shouldn't stop the batch
@@ -517,258 +598,137 @@ export default function FundDetailView({
   }
 
   const renderTable = (holdingRows: FundRow[]) => {
-    const tableRows = holdingRows.flatMap((row, i) => {
-      const state = matchStates[row.id]
-      const saved = savedKpis[row.id]
-      const isOpen = state?.open
-      const hasMatches = !!state?.matches
-      const exclusion = exclusionCodes[row.id]
-      const isExcluded = !!exclusion
-      const isDoubleCount = doubleCountFlags.has(row.id)
-      const excInfo = exclusion ? EXCLUSION_LABELS[exclusion] : null
-
-      const rowBg = isExcluded
-        ? 'bg-gray-900/30 opacity-60'
-        : i > 0 ? 'border-t border-gray-800' : ''
-
-      const metricRow = (
-        <tr key={row.id} className={`hover:bg-gray-800/30 transition-colors ${rowBg}`}>
-          {/* Value */}
-          <td className="px-4 py-3 text-xs whitespace-nowrap">
-            {indicatorOverrides[row.id] ? (
-              <span className="text-indigo-300 font-medium">{indicatorOverrides[row.id]}</span>
-            ) : (
-              <span className="text-gray-400">{row.level_of_indicator || '—'}</span>
-            )}
-          </td>
-          {/* Metric */}
-          <td className="px-4 py-3 text-white font-medium max-w-xs">
-            <p className={`leading-snug ${isExcluded ? 'line-through text-gray-500' : ''}`}>{row.metric || '—'}</p>
-          </td>
-          {/* Unit */}
-          <td className="px-4 py-3 text-xs whitespace-nowrap">
-            {unitOverrides[row.id] ? (
-              <span className="text-indigo-300 font-medium">{unitOverrides[row.id]}</span>
-            ) : (
-              <span className="text-gray-400">{row.unit_of_metric || '—'}</span>
-            )}
-          </td>
-          {/* Reporting Level */}
-          <td className="px-4 py-3 text-xs whitespace-nowrap">
-            {row.reporting_level ? (
-              <span className="px-2 py-0.5 bg-gray-800 border border-gray-700 text-gray-400 rounded text-xs">
-                {row.reporting_level}
-              </span>
-            ) : <span className="text-gray-600">—</span>}
-          </td>
-          {/* Outcome */}
-          <td className="px-4 py-3 text-gray-400 text-xs max-w-xs">
-            <p className="leading-relaxed line-clamp-3">{row.social_environmental_outcome || '—'}</p>
-            {row.comments && (
-              <p className="text-gray-600 mt-1 line-clamp-2 italic">{row.comments}</p>
-            )}
-          </td>
-          {/* Status */}
-          <td className="px-4 py-3">
-            {row.status_of_outcome ? <StatusBadge status={row.status_of_outcome} /> : <span className="text-gray-600">—</span>}
-          </td>
-          {/* Impact Area */}
-          <td className="px-4 py-3 text-gray-400 text-xs">{row.rally_impact_area || '—'}</td>
-          {/* Rally Outcome */}
-          <td className="px-4 py-3 text-gray-400 text-xs">{row.rally_outcome || '—'}</td>
-          {/* Matched KPI */}
-          <td className="px-4 py-3">
-            {isExcluded ? (
-              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${excInfo?.color ?? 'bg-gray-800 text-gray-400 border-gray-700'}`}>
-                {excInfo?.label ?? exclusion}
-              </span>
-            ) : saved ? (
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="px-2 py-0.5 bg-indigo-900/60 border border-indigo-700 text-indigo-300 text-xs font-mono font-bold rounded">
-                    {saved.code}
-                  </span>
-                  {saved.confidence != null && (
-                    <span className={`text-xs font-medium px-1.5 py-0.5 rounded border ${
-                      saved.confidence >= 80
-                        ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800'
-                        : 'bg-amber-900/40 text-amber-400 border-amber-800'
-                    }`}>
-                      {saved.confidence}%
-                    </span>
-                  )}
-                </div>
-                <span className="text-xs text-gray-400 leading-snug max-w-[160px]">{saved.name}</span>
-                {saved.flag === 'needs_review' && (
-                  <span className="text-xs text-amber-500 flex items-center gap-1">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                    </svg>
-                    Needs review
-                  </span>
-                )}
-                {isDoubleCount && (
-                  <span className="text-xs text-orange-400 flex items-center gap-1">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                    Possible double count
-                  </span>
-                )}
-              </div>
-            ) : (
-              <button
-                onClick={() => handleMatch(row)}
-                disabled={state?.loading}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-all whitespace-nowrap disabled:opacity-50 ${
-                  isOpen && hasMatches
-                    ? 'bg-indigo-600 text-white hover:bg-indigo-500'
-                    : hasMatches && !isOpen
-                    ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-700 hover:bg-emerald-800/60'
-                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white border border-gray-700'
-                }`}
-              >
-                {state?.loading ? (
-                  <>
-                    <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-                    Matching…
-                  </>
-                ) : isOpen && hasMatches ? (
-                  <>
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                    </svg>
-                    Hide results
-                  </>
-                ) : hasMatches && !isOpen ? (
-                  <>
-                    <span className="w-2 h-2 bg-emerald-400 rounded-full flex-shrink-0" />
-                    {state!.matches!.length} match{state!.matches!.length !== 1 ? 'es' : ''} found
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                    Match KPI
-                  </>
-                )}
-              </button>
-            )}
-          </td>
-          {/* Exclude control */}
-          <td className="px-3 py-3">
-            {excludingRow === row.id ? (
-              <span className="w-4 h-4 border border-gray-500 border-t-transparent rounded-full animate-spin inline-block" />
-            ) : isExcluded ? (
-              <button
-                onClick={() => handleExclude(row.id, null)}
-                title="Remove exclusion"
-                className="text-gray-600 hover:text-emerald-400 transition text-xs"
-              >
-                Restore
-              </button>
-            ) : (
-              <div className="relative">
-                <button
-                  onClick={() => setOpenExcludeMenu(openExcludeMenu === row.id ? null : row.id)}
-                  title="Flag this row for exclusion"
-                  className="p-1 text-gray-700 hover:text-amber-400 transition rounded"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6H13l-1-1H5a2 2 0 00-2 2zm9-13.5V9" />
-                  </svg>
-                </button>
-                {openExcludeMenu === row.id && (
-                  <div className="absolute right-0 top-7 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]">
-                    <p className="px-3 py-1 text-xs text-gray-500 font-semibold uppercase tracking-wide border-b border-gray-700 mb-1">Flag as…</p>
-                    {[
-                      { code: 'forecasted',   label: 'Forecasted' },
-                      { code: 'double_count', label: 'Double count' },
-                      { code: 'outdated',     label: 'Outdated' },
-                      { code: 'missing',      label: 'Missing value' },
-                    ].map(opt => (
-                      <button
-                        key={opt.code}
-                        onClick={() => { handleExclude(row.id, opt.code); setOpenExcludeMenu(null) }}
-                        className="block w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700 hover:text-white transition"
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </td>
-        </tr>
-      )
-
-      if (!isOpen || isExcluded) return [metricRow]
-
-      const expandedRow = (
-        <tr key={`${row.id}-expanded`} className="border-t border-gray-800 bg-gray-900/60">
-          <td colSpan={10} className="px-5 py-4">
-            {state.loading && (
-              <div className="flex items-center gap-3 text-gray-400 text-sm py-1">
-                <span className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                Analysing metric and searching Rally KPI library…
-              </div>
-            )}
-            {state.error && (
-              <div className="px-4 py-3 bg-red-950 border border-red-800 rounded-lg text-red-400 text-sm">
-                {state.error}
-              </div>
-            )}
-            {state.matches && state.matches.length === 0 && (
-              <p className="text-gray-500 text-sm py-1">No matching KPIs found for this metric.</p>
-            )}
-            {state.matches && state.matches.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
-                  Suggested KPI Matches — {state.matches.length} found
-                </p>
-                <div className="grid gap-3">
-                  {state.matches.map((match, mi) => (
-                    <MatchCard
-                      key={match.kpi_code}
-                      match={match}
-                      rank={mi + 1}
-                      isSelected={saved?.code === match.kpi_code}
-                      isSaving={savingRow === row.id + match.kpi_code}
-                      rowUnit={row.unit_of_metric}
-                      rowValue={row.level_of_indicator}
-                      onSelect={(m, unit, cv) => handleSelect(row.id, m, unit, cv)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-          </td>
-        </tr>
-      )
-
-      return [metricRow, expandedRow]
-    })
-
     return (
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-xs text-left border-collapse">
           <thead>
-            <tr className="border-b border-gray-800 text-left bg-gray-900">
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-24">Value</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Metric</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-24">Unit</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Rep. Level</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Outcome</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide w-32">Status</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Impact Area</th>
-              <th className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Rally Outcome</th>
-              <th className="px-4 py-2.5 w-48 text-xs font-semibold text-gray-500 uppercase tracking-wide">Matched KPI</th>
-              <th className="px-3 py-2.5 w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">Exclude</th>
+            <tr className="border-b border-gray-700 bg-gray-800/60">
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Metric</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Holding</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Reporting Level</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Level of Indicator</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Unit of Metric</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Status</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Start</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">End</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Impact Area</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Rally Outcome</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Social/Env Outcome</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Comments</th>
+              <th className="px-3 py-2 text-gray-400 font-semibold whitespace-nowrap">Matched KPI</th>
             </tr>
           </thead>
-          <tbody>{tableRows}</tbody>
+          <tbody>
+            {holdingRows.map((row, i) => {
+              const state = matchStates[row.id]
+              const saved = savedKpis[row.id]
+              const isOpen = state?.open
+              const exclusion = exclusionCodes[row.id]
+              const isExcluded = !!exclusion
+
+              return (
+                <React.Fragment key={row.id}>
+                  <tr
+                    key={row.id}
+                    className={`border-b border-gray-800 transition-colors ${i % 2 === 0 ? 'bg-gray-900' : 'bg-gray-900/60'} ${isExcluded ? 'opacity-40' : 'hover:bg-gray-800/50'}`}
+                  >
+                    <td className="px-3 py-2 text-white max-w-xs">
+                      <span className={isExcluded ? 'line-through text-gray-500' : ''}>{row.metric || '—'}</span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{row.underlying_holding || '—'}</td>
+                    <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{row.reporting_level || '—'}</td>
+                    <td className="px-3 py-2 text-white font-medium whitespace-nowrap">
+                      {row.level_of_indicator || <span className="text-gray-600">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{row.unit_of_metric || '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {row.status_of_outcome
+                        ? <StatusBadge status={row.status_of_outcome} />
+                        : <span className="text-gray-600">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{row.reporting_start || '—'}</td>
+                    <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{row.reporting_end || '—'}</td>
+                    <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{row.rally_impact_area || '—'}</td>
+                    <td className="px-3 py-2 text-gray-300 max-w-xs">{row.rally_outcome || '—'}</td>
+                    <td className="px-3 py-2 text-gray-300 max-w-xs">{row.social_environmental_outcome || '—'}</td>
+                    <td className="px-3 py-2 text-gray-400 italic max-w-xs">{row.comments || '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {saved ? (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="px-1.5 py-0.5 bg-indigo-900/60 border border-indigo-700 text-indigo-300 font-mono font-bold rounded text-xs">
+                            {saved.code}
+                          </span>
+                          {saved.confidence != null && (
+                            <span className={`text-xs px-1 py-0.5 rounded border ${saved.confidence >= 80 ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800' : 'bg-amber-900/40 text-amber-400 border-amber-800'}`}>
+                              {saved.confidence}%
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handleMatch(row)}
+                            disabled={state?.loading}
+                            className="text-xs text-gray-500 hover:text-gray-300 transition disabled:opacity-50"
+                          >
+                            {state?.loading ? <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin inline-block" /> : 'Re-match'}
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => handleMatch(row)}
+                          disabled={state?.loading || isExcluded}
+                          className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-lg bg-gray-800 hover:bg-indigo-600 text-gray-300 hover:text-white border border-gray-700 hover:border-indigo-600 transition disabled:opacity-40"
+                        >
+                          {state?.loading ? (
+                            <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                          )}
+                          {state?.loading ? 'Matching…' : 'Match KPI'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+
+                  {/* KPI match results row */}
+                  {isOpen && !isExcluded && (
+                    <tr className="bg-gray-800/40 border-b border-gray-700">
+                      <td colSpan={13} className="px-4 py-3">
+                        {state.loading && (
+                          <div className="flex items-center gap-2 text-gray-400 text-xs">
+                            <span className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                            Analysing metric and searching Rally KPI library…
+                          </div>
+                        )}
+                        {state.error && (
+                          <p className="text-red-400 text-xs">{state.error}</p>
+                        )}
+                        {state.matches && state.matches.length === 0 && (
+                          <p className="text-gray-500 text-xs">No matching KPIs found.</p>
+                        )}
+                        {state.matches && state.matches.length > 0 && (
+                          <div className="grid gap-2">
+                            {state.matches.map((match, mi) => (
+                              <MatchCard
+                                key={match.kpi_code}
+                                match={match}
+                                rank={mi + 1}
+                                isSelected={saved?.code === match.kpi_code}
+                                isSaving={savingRow === row.id + match.kpi_code}
+                                rowUnit={row.unit_of_metric}
+                                rowValue={row.level_of_indicator}
+                                onSelect={(m, unit, cv) => handleSelect(row.id, m, unit, cv)}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              )
+            })}
+          </tbody>
         </table>
       </div>
     )
@@ -797,6 +757,66 @@ export default function FundDetailView({
 
   return (
     <div className="space-y-6">
+
+      {/* Re-map columns panel */}
+      {remapOpen && rawHeaders.length > 0 && (
+        <div className="bg-gray-900 border border-amber-700/60 rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Fix column mapping</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Match each field to the correct column from your original spreadsheet, then save to update all rows.
+              </p>
+            </div>
+            <button onClick={() => setRemapOpen(false)} className="text-gray-500 hover:text-white transition">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="px-5 py-4">
+            <div className="grid grid-cols-2 gap-x-8 gap-y-3">
+              {DB_FIELD_LABELS.map(({ key, label }) => (
+                <div key={key} className="flex items-center gap-3">
+                  <span className="text-xs text-gray-400 w-52 flex-shrink-0">{label}</span>
+                  <select
+                    value={remapMap[key] ?? ''}
+                    onChange={e => setRemapMap(prev => ({ ...prev, [key]: e.target.value }))}
+                    className={`flex-1 px-2.5 py-1.5 bg-gray-800 border rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 ${
+                      remapMap[key] ? 'border-indigo-700 text-white' : 'border-gray-700 text-gray-500'
+                    }`}
+                  >
+                    <option value="">— not mapped —</option>
+                    {rawHeaders.map(h => (
+                      <option key={h} value={h}>{h}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+            {remapError && (
+              <p className="mt-3 text-xs text-red-400">{remapError}</p>
+            )}
+            <div className="flex items-center gap-3 mt-4">
+              <button
+                onClick={handleSaveRemap}
+                disabled={remapSaving || remapSuccess}
+                className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition"
+              >
+                {remapSaving ? (
+                  <><span className="w-3 h-3 border border-white border-t-transparent rounded-full animate-spin" /> Remapping…</>
+                ) : remapSuccess ? (
+                  <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg> Done</>
+                ) : 'Apply remapping to all rows'}
+              </button>
+              <button onClick={() => setRemapOpen(false)} className="text-sm text-gray-500 hover:text-white transition">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Matched metrics dashboard — compact table */}
       {matchedRows.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
@@ -869,7 +889,7 @@ export default function FundDetailView({
       {/* Batch control bar */}
       <div>
         {!batch?.running && (
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <p className="text-sm text-gray-500">
               {unmatchedCount > 0
                 ? `${unmatchedCount} metric${unmatchedCount !== 1 ? 's' : ''} not yet matched`
@@ -877,17 +897,30 @@ export default function FundDetailView({
                 ? 'All metrics matched'
                 : ''}
             </p>
-            {unmatchedCount > 0 && (
-              <button
-                onClick={runBatch}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-all shadow-lg shadow-indigo-900/30"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                Find KPIs
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {rawHeaders.length > 0 && (
+                <button
+                  onClick={handleOpenRemap}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 rounded-lg transition"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 6h16M4 12h16M4 18h7" />
+                  </svg>
+                  Fix column mapping
+                </button>
+              )}
+              {unmatchedCount > 0 && (
+                <button
+                  onClick={runBatch}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-all shadow-lg shadow-indigo-900/30"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                  Find KPIs
+                </button>
+              )}
+            </div>
           </div>
         )}
 

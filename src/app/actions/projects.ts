@@ -115,6 +115,43 @@ export async function setExclusionCode(
   return { error: null }
 }
 
+export async function remapProjectRows(
+  projectId: string,
+  columnMap: Record<string, string>,  // dbField → raw_row column name
+): Promise<{ error: string | null; updated: number }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return { error: 'Not authenticated', updated: 0 }
+
+  const { data: rows, error: fetchErr } = await supabase
+    .from('fund_report_rows')
+    .select('id, raw_row')
+    .eq('project_id', projectId)
+
+  if (fetchErr || !rows?.length) return { error: fetchErr?.message ?? 'No rows found', updated: 0 }
+
+  const DB_FIELDS = [
+    'project_name', 'metric', 'social_environmental_outcome', 'status_of_outcome',
+    'comments', 'reporting_level', 'underlying_holding', 'level_of_indicator',
+    'unit_of_metric', 'rally_impact_area', 'rally_outcome', 'reporting_start', 'reporting_end',
+  ]
+
+  let updated = 0
+  for (const row of rows) {
+    const raw = (row.raw_row ?? {}) as Record<string, string>
+    const update: Record<string, string> = {}
+    for (const field of DB_FIELDS) {
+      const col = columnMap[field]
+      update[field] = col ? (raw[col] ?? '') : ''
+    }
+    const { error } = await supabase.from('fund_report_rows').update(update).eq('id', row.id)
+    if (!error) updated++
+  }
+
+  revalidatePath(`/dashboard/funds/${projectId}`)
+  return { error: null, updated }
+}
+
 export async function deleteProject(projectId: string): Promise<{ error: string | null }> {
   const supabase = await createClient()
   const { error } = await supabase.from('projects').delete().eq('id', projectId)
