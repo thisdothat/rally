@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useRef, useMemo } from 'react'
-import { saveKpiMatch, setExclusionCode, remapProjectRows } from '@/app/actions/projects'
+import { saveKpiMatch, remapProjectRows } from '@/app/actions/projects'
 
 type Conversion = {
   from_unit: string
@@ -67,12 +67,6 @@ export type FundRow = {
   raw_row?: Record<string, string> | null
 }
 
-const EXCLUSION_LABELS: Record<string, { label: string; color: string }> = {
-  'forecasted':   { label: 'Forecasted',   color: 'bg-purple-900/60 text-purple-300 border-purple-700' },
-  'double_count': { label: 'Double Count', color: 'bg-orange-900/60 text-orange-300 border-orange-700' },
-  'outdated':     { label: 'Outdated',     color: 'bg-yellow-900/60 text-yellow-300 border-yellow-700' },
-  'missing':      { label: 'Missing',      color: 'bg-red-900/60 text-red-300 border-red-700' },
-}
 
 const STATUS_COLORS: Record<string, string> = {
   'Achieved':      'bg-emerald-900 text-emerald-300 border-emerald-800',
@@ -351,12 +345,18 @@ export default function FundDetailView({
   )
   const [unitOverrides, setUnitOverrides] = useState<Record<string, string>>({})
   const [indicatorOverrides, setIndicatorOverrides] = useState<Record<string, string>>({})
-  const [exclusionCodes, setExclusionCodes] = useState<Record<string, string | null>>(() =>
+  const [exclusionCodes] = useState<Record<string, string | null>>(() =>
     Object.fromEntries(rows.map(r => [r.id, r.exclusion_code ?? null]))
   )
+  const [kpiEdits, setKpiEdits] = useState<Record<string, { code: string; name: string }>>(() =>
+    Object.fromEntries(
+      rows
+        .filter(r => r.matched_kpi_code)
+        .map(r => [r.id, { code: r.matched_kpi_code!, name: r.matched_kpi_name ?? '' }])
+    )
+  )
   const [savingRow, setSavingRow] = useState<string | null>(null)
-  const [excludingRow, setExcludingRow] = useState<string | null>(null)
-  const [openExcludeMenu, setOpenExcludeMenu] = useState<string | null>(null)
+
   const [batch, setBatch] = useState<BatchState | null>(null)
   const cancelRef = useRef(false)
 
@@ -434,22 +434,6 @@ export default function FundDetailView({
 
   const unmatchedCount = rows.filter(r => !savedKpis[r.id] && !exclusionCodes[r.id]).length
 
-  // Detect double-counting: same holding matched to same KPI more than once
-  const doubleCountFlags = useMemo(() => {
-    const seen = new Map<string, string[]>()
-    for (const row of rows) {
-      const saved = savedKpis[row.id]
-      if (!saved) continue
-      const key = `${row.underlying_holding ?? ''}::${saved.code}`
-      if (!seen.has(key)) seen.set(key, [])
-      seen.get(key)!.push(row.id)
-    }
-    const flagged = new Set<string>()
-    Array.from(seen.values()).forEach(ids => {
-      if (ids.length > 1) ids.forEach((id: string) => flagged.add(id))
-    })
-    return flagged
-  }, [rows, savedKpis])
 
   const handleMatch = async (row: FundRow) => {
     const current = matchStates[row.id]
@@ -506,6 +490,7 @@ export default function FundDetailView({
         alert(`Could not save KPI: ${error}`)
       } else {
         setSavedKpis(prev => ({ ...prev, [rowId]: { code: match.kpi_code, name: match.kpi_name, id: match.kpi_id, unit, confidence, flag } }))
+        setKpiEdits(prev => ({ ...prev, [rowId]: { code: match.kpi_code, name: match.kpi_name } }))
         if (unitChanged) setUnitOverrides(prev => ({ ...prev, [rowId]: unit }))
         if (indicatorStr) setIndicatorOverrides(prev => ({ ...prev, [rowId]: indicatorStr }))
         setMatchStates(prev => ({ ...prev, [rowId]: { ...prev[rowId], open: false } }))
@@ -516,11 +501,20 @@ export default function FundDetailView({
     setSavingRow(null)
   }
 
-  const handleExclude = async (rowId: string, code: string | null) => {
-    setExcludingRow(rowId)
-    const { error } = await setExclusionCode(rowId, projectId, code)
-    if (!error) setExclusionCodes(prev => ({ ...prev, [rowId]: code }))
-    setExcludingRow(null)
+
+  const handleKpiEditBlur = async (rowId: string) => {
+    const edit = kpiEdits[rowId]
+    const saved = savedKpis[rowId]
+    if (!edit || !saved) return
+    if (edit.code === saved.code && edit.name === saved.name) return
+    const { error } = await saveKpiMatch(
+      rowId, projectId,
+      edit.code || null, edit.name || null, saved.id ?? null,
+      null, null, saved.confidence ?? null, saved.flag ?? null,
+    )
+    if (!error) {
+      setSavedKpis(prev => ({ ...prev, [rowId]: { ...prev[rowId]!, code: edit.code, name: edit.name } }))
+    }
   }
 
   const runBatch = async () => {
@@ -579,6 +573,7 @@ export default function FundDetailView({
             )
             if (!error) {
               setSavedKpis(prev => ({ ...prev, [row.id]: { code: top.kpi_code, name: top.kpi_name, id: top.kpi_id, unit: row.unit_of_metric ?? '', confidence, flag } }))
+              setKpiEdits(prev => ({ ...prev, [row.id]: { code: top.kpi_code, name: top.kpi_name } }))
             }
           } catch { /* silently continue */ }
         }
@@ -652,24 +647,37 @@ export default function FundDetailView({
                     <td className="px-3 py-2 text-gray-300 max-w-xs">{row.rally_outcome || '—'}</td>
                     <td className="px-3 py-2 text-gray-300 max-w-xs">{row.social_environmental_outcome || '—'}</td>
                     <td className="px-3 py-2 text-gray-400 italic max-w-xs">{row.comments || '—'}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">
+                    <td className="px-3 py-2" style={{minWidth: '220px'}}>
                       {saved ? (
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="px-1.5 py-0.5 bg-indigo-900/60 border border-indigo-700 text-indigo-300 font-mono font-bold rounded text-xs">
-                            {saved.code}
-                          </span>
-                          {saved.confidence != null && (
-                            <span className={`text-xs px-1 py-0.5 rounded border ${saved.confidence >= 80 ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800' : 'bg-amber-900/40 text-amber-400 border-amber-800'}`}>
-                              {saved.confidence}%
-                            </span>
-                          )}
-                          <button
-                            onClick={() => handleMatch(row)}
-                            disabled={state?.loading}
-                            className="text-xs text-gray-500 hover:text-gray-300 transition disabled:opacity-50"
-                          >
-                            {state?.loading ? <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin inline-block" /> : 'Re-match'}
-                          </button>
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={kpiEdits[row.id]?.code ?? saved.code}
+                              onChange={e => setKpiEdits(prev => ({ ...prev, [row.id]: { ...prev[row.id] ?? { code: saved.code, name: saved.name }, code: e.target.value } }))}
+                              onBlur={() => handleKpiEditBlur(row.id)}
+                              className="w-24 px-1.5 py-0.5 bg-indigo-950/60 border border-indigo-700 text-indigo-300 font-mono font-bold rounded text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                            />
+                            {saved.confidence != null && (
+                              <span className={`text-xs px-1 py-0.5 rounded border flex-shrink-0 ${saved.confidence >= 80 ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800' : 'bg-amber-900/40 text-amber-400 border-amber-800'}`}>
+                                {saved.confidence}%
+                              </span>
+                            )}
+                            <button
+                              onClick={() => handleMatch(row)}
+                              disabled={state?.loading}
+                              className="text-xs text-gray-600 hover:text-gray-300 transition disabled:opacity-50 flex-shrink-0"
+                            >
+                              {state?.loading ? <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin inline-block" /> : 'Re-match'}
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={kpiEdits[row.id]?.name ?? saved.name}
+                            onChange={e => setKpiEdits(prev => ({ ...prev, [row.id]: { ...prev[row.id] ?? { code: saved.code, name: saved.name }, name: e.target.value } }))}
+                            onBlur={() => handleKpiEditBlur(row.id)}
+                            className="w-full px-1.5 py-0.5 bg-gray-800 border border-gray-700 text-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          />
                         </div>
                       ) : (
                         <button
